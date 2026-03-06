@@ -68,6 +68,7 @@ class WindowedEMGDataModule(pl.LightningDataModule):
                     window_length=self.window_length,
                     padding=self.padding,
                     jitter=True,
+                    augment=True,
                 )
                 for hdf5_path in self.train_sessions
             ]
@@ -158,23 +159,60 @@ class TDSConvCTCModule(pl.LightningModule):
 
         # Model
         # inputs: (T, N, bands=2, electrode_channels=16, freq)
-        self.model = nn.Sequential(
-            # (T, N, bands=2, C=16, freq)
+        # self.model = nn.Sequential(
+        #     # (T, N, bands=2, C=16, freq)
+        #     SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),
+        #     # (T, N, bands=2, mlp_features[-1])
+        #     MultiBandRotationInvariantMLP(
+        #         in_features=in_features,
+        #         mlp_features=mlp_features,
+        #         num_bands=self.NUM_BANDS,
+        #     ),
+        #     # (T, N, num_features)
+        #     nn.Flatten(start_dim=2),
+        #     TDSConvEncoder(
+        #         num_features=num_features,
+        #         block_channels=block_channels,
+        #         kernel_width=kernel_width,
+        #     ),
+        #     # (T, N, num_classes)
+        #     nn.Linear(num_features, charset().num_classes),
+        #     nn.LogSoftmax(dim=-1),
+        # )
+        # Feature extractor (same as before)
+        self.frontend = nn.Sequential(
             SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),
-            # (T, N, bands=2, mlp_features[-1])
             MultiBandRotationInvariantMLP(
                 in_features=in_features,
                 mlp_features=mlp_features,
                 num_bands=self.NUM_BANDS,
             ),
-            # (T, N, num_features)
             nn.Flatten(start_dim=2),
-            TDSConvEncoder(
-                num_features=num_features,
-                block_channels=block_channels,
-                kernel_width=kernel_width,
-            ),
-            # (T, N, num_classes)
+        )
+
+        self.encoder = TDSConvEncoder(
+            num_features=num_features,
+            block_channels=block_channels,
+            kernel_width=kernel_width,
+        )
+
+        # # NEW: recurrent layer
+        # rnn_hidden = 256
+        # rnn_layers = 2
+        # bidirectional = True
+        # self.rnn = nn.GRU(
+        #     input_size=num_features,
+        #     hidden_size=rnn_hidden,
+        #     num_layers=rnn_layers,
+        #     bidirectional=bidirectional,
+        #     batch_first=False,  # time-first (T, N, C)
+        #     dropout=0.1 if rnn_layers > 1 else 0.0,
+        # )
+        #
+        #rnn_out_dim = rnn_hidden * (2 if bidirectional else 1)
+
+        self.classifier = nn.Sequential(
+            #nn.Linear(rnn_out_dim, charset().num_classes),
             nn.Linear(num_features, charset().num_classes),
             nn.LogSoftmax(dim=-1),
         )
@@ -195,7 +233,11 @@ class TDSConvCTCModule(pl.LightningModule):
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return self.model(inputs)
+        x = self.frontend(inputs)          # (T, N, num_features)
+        x = self.encoder(x)                # (T', N, num_features)
+        #x, _ = self.rnn(x)                 # (T', N, rnn_out_dim)
+        emissions = self.classifier(x)     # (T', N, num_classes) log-probs
+        return emissions
 
     def _step(
         self, phase: str, batch: dict[str, torch.Tensor], *args, **kwargs
@@ -208,12 +250,25 @@ class TDSConvCTCModule(pl.LightningModule):
 
         emissions = self.forward(inputs)
 
+        # right after: emissions = self.forward(inputs)
+        print("emissions shape", emissions.shape)
+        print("emissions max", emissions.max().item(), "min", emissions.min().item())
+        print("finite?", torch.isfinite(emissions).all().item())
+
         # Shrink input lengths by an amount equivalent to the conv encoder's
         # temporal receptive field to compute output activation lengths for CTCLoss.
         # NOTE: This assumes the encoder doesn't perform any temporal downsampling
         # such as by striding.
         T_diff = inputs.shape[0] - emissions.shape[0]
         emission_lengths = input_lengths - T_diff
+        print("T_in, T_out, T_diff", inputs.shape[0], emissions.shape[0], T_diff)
+        print("input_lengths min/max", input_lengths.min().item(), input_lengths.max().item())
+        print("emission_lengths min/max", emission_lengths.min().item(), emission_lengths.max().item())
+        print("target_lengths min/max", target_lengths.min().item(), target_lengths.max().item())
+
+        assert (emission_lengths > 0).all(), "Some emission lengths <= 0"
+        assert (emission_lengths <= emissions.shape[0]).all(), "Some emission lengths > T_out"
+        assert (target_lengths <= emission_lengths).all(), "Some targets longer than emissions"
 
         loss = self.ctc_loss(
             log_probs=emissions,  # (T, N, num_classes)
