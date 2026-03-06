@@ -9,6 +9,54 @@ from collections.abc import Sequence
 import torch
 from torch import nn
 
+class TemporalBlock(nn.Module):
+  """Residual dilated Conv1d block (TCN-style). """
+  def __init__(self, channels: int, kernel_size: int, dilation: int, dropout: float):
+    super().__init__()
+    padding = (kernel_size - 1) * dilation // 2  # "same-ish" padding for odd kernel sizes
+    self.net = nn.Sequential(
+    nn.Conv1d(channels, channels, kernel_size, padding=padding, dilation=dilation),
+    nn.GELU(),
+    nn.Dropout(dropout),
+    nn.Conv1d(channels, channels, kernel_size, padding=padding, dilation=dilation),
+    nn.GELU(),
+    nn.Dropout(dropout),
+    )
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    # x: (N, C, T)
+    return x + self.net(x)
+
+class TCNEncoder(nn.Module):
+  """
+  TCN encoder operating on time-first tensors.
+  Input:  (T, N, C)
+  Output: (T, N, C)  (same length; no downsampling)
+  """
+  def __init__(
+    self,
+    num_features: int,
+    num_blocks: int = 6,
+    kernel_size: int = 5,
+    dropout: float = 0.1,
+    dilation_base: int = 2,
+    ):
+    super().__init__()
+    assert kernel_size % 2 == 1, "Use odd kernel_size to preserve length cleanly"
+    blocks = []
+    for i in range(num_blocks):
+        dilation = dilation_base ** i
+        blocks.append(TemporalBlock(num_features, kernel_size, dilation, dropout))
+    self.net = nn.Sequential(*blocks)
+
+def forward(self, x: torch.Tensor) -> torch.Tensor:
+    # x: (T, N, C) -> (N, C, T)
+    x = x.transpose(0, 1).transpose(1, 2)
+    x = self.net(x)
+    # back: (N, C, T) -> (T, N, C)
+    x = x.transpose(1, 2).transpose(0, 1)
+    return x
+
 
 class SpectrogramNorm(nn.Module):
     """A `torch.nn.Module` that applies 2D batch normalization over spectrogram

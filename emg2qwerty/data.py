@@ -420,7 +420,50 @@ class LabelData:
     def __str__(self) -> str:
         """Human-readable string representation for display."""
         return self.text.replace("⏎", "\n")
+# GUASSIAN NOISE 
+def augment_emg(emg: torch.Tensor, p_drop: float = 0.5, k: int = 4, noise_scale: float = 0.01, gain_jitter: float=0.15, p_gain:float=1.0) -> torch.Tensor:
+    """
+    Simple training-time augmentation:
+      - Channel dropout: randomly zeros out k channels with prob p_drop
+      - Gaussian noise: adds small noise scaled to sample std
 
+    Works for EMG shaped (T, C) or (T, 2, 16) etc. We treat the *last dimension after flattening*
+    as channels.
+    """
+    assert torch.is_tensor(emg)
+
+    orig_shape = emg.shape
+
+    # Flatten all non-time dims into "channels"
+    if emg.dim() >= 3:
+        T = emg.shape[0]
+        emg2 = emg.reshape(T, -1)
+    else:
+        emg2 = emg
+
+    # Channel dropout (structured dropout)
+    if torch.rand(1).item() < p_drop:
+        Ctotal = emg2.shape[-1]
+        k_eff = min(k, Ctotal)
+        drop_idx = torch.randperm(Ctotal)[:k_eff]
+        emg2[:, drop_idx] = 0.0
+
+    # Gaussian noise (scaled by per-sample std)
+    #std = emg2.std().clamp_min(1e-6)
+    #emg2 = emg2 + torch.randn_like(emg2) * (noise_scale * std)
+
+    # Gain jitter (multiplicative per channel)
+    # Gain jitter strength: 0.15 means each channel scaled by ~Uniform(0.85, 1.15)
+    if gain_jitter > 0 and torch.rand(1).item() < p_gain:
+      Ctotal = emg2.shape[-1]
+      gains = 1.0 + (torch.rand(Ctotal, device=emg2.device) * 2.0 - 1.0) * gain_jitter
+      emg2 = emg2 * gains.unsqueeze(0)
+
+    # Restore original shape
+    if emg.dim() >= 3:
+        emg2 = emg2.reshape(orig_shape)
+
+    return emg2
 
 @dataclass
 class WindowedEMGDataset(torch.utils.data.Dataset):
@@ -443,6 +486,8 @@ class WindowedEMGDataset(torch.utils.data.Dataset):
             a window/slice of `EMGSessionData` in the form of a numpy
             structured array and returns a `torch.Tensor` instance.
             (default: ``emg2qwerty.transforms.ToTensor()``)
+        augment (bool): If True, apply training-time augmentation to EMG.
+            (default: ``False``)
     """
 
     hdf5_path: Path
@@ -451,6 +496,9 @@ class WindowedEMGDataset(torch.utils.data.Dataset):
     padding: InitVar[tuple[int, int]] = (0, 0)
     jitter: bool = False
     transform: Transform[np.ndarray, torch.Tensor] = field(default_factory=ToTensor)
+
+    # NEW: augmentation flag
+    augment: bool = False
 
     def __post_init__(
         self,
@@ -461,7 +509,7 @@ class WindowedEMGDataset(torch.utils.data.Dataset):
         with EMGSessionData(self.hdf5_path) as session:
             assert (
                 session.condition == "on_keyboard"
-            ), f"Unsupported condition {self.session.condition}"
+            ), f"Unsupported condition {session.condition}"
             self.session_length = len(session)
 
         self.window_length = (
@@ -499,6 +547,14 @@ class WindowedEMGDataset(torch.utils.data.Dataset):
         # Extract EMG tensor corresponding to the window.
         emg = self.transform(window)
         assert torch.is_tensor(emg)
+
+        # apply augmentation only if enabled
+        #if self.augment:
+        #    emg = augment_emg(emg, p_drop=0.5, k=4, noise_scale=0.01)
+
+        if self.augment:
+          # Gain jitter experiment: Gaussian off (noise_scale=0.0)
+          emg = augment_emg(emg, p_drop=0.5, k=4, gain_jitter=0.15, p_gain=1.0, noise_scale=0.0)
 
         # Extract labels corresponding to the original (un-padded) window.
         timestamps = window[EMGSessionData.TIMESTAMPS]

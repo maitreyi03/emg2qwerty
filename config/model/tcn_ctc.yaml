@@ -1,0 +1,17 @@
+# config/model/tcn_ctc.yaml
+module:
+  _target_: emg2qwerty.lightning.TCNCTCModule
+
+  # keep same frontend as baseline
+  in_features: 528
+  mlp_features: [384]
+
+  # TCN knobs
+  tcn_num_blocks: 6
+  tcn_kernel_size: 5
+  tcn_dropout: 0.1
+  tcn_dilation_base: 2
+
+datamodule:
+  window_length: 140000
+  padding: [1800, 200]
