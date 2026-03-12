@@ -243,3 +243,86 @@ class SpecAugment:
 
         # (..., C, freq, T) -> (T, ..., C, freq)
         return x.movedim(-1, 0)
+
+
+@dataclass
+class ChannelMask:
+    """Masks electrode channels for channel-ablation experiments.
+
+    This transform operates on EMG tensors shaped `(T, 2, 16)`, where:
+      - `T` is the number of time samples,
+      - the second dimension indexes the two wrist groups/bands,
+      - the last dimension indexes the 16 electrode channels per wrist.
+
+    The tensor shape is preserved. Channels that are not selected are set to
+    zero, so the downstream model can still use the same input dimensions.
+
+    Args:
+        mode (str): Channel-selection strategy. One of:
+            `"all"` (keep all 32 channels),
+            `"random_subset"` (keep a fixed random subset of total channels),
+            `"left_only"` (keep only the left wrist channels),
+            `"right_only"` (keep only the right wrist channels).
+            (default: `"all"`)
+        keep_total_channels (int): Total number of channels to keep when
+            `mode="random_subset"`. (default: 32)
+        seed (int): Random seed used for reproducible channel selection in
+            `mode="random_subset"`. (default: 0)
+    """
+    mode: str = "all"          # all | random_subset | left_only | right_only
+    keep_total_channels: int = 32
+    seed: int = 0
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        # expected shape: (T, 2, 16)
+        y = x.clone()
+
+        if self.mode == "all":
+            return y
+
+        if self.mode == "left_only":
+            y[:, 1, :] = 0 # zero out right channels
+            return y
+
+        if self.mode == "right_only":
+            y[:, 0, :] = 0 # zero out left channels
+            return y
+
+        if self.mode == "random_subset":
+            total = 32
+            g = torch.Generator()
+            g.manual_seed(self.seed)
+
+            keep = torch.randperm(total, generator=g)[: self.keep_total_channels]
+            mask = torch.zeros(total, dtype=y.dtype, device=y.device)
+            mask[keep] = 1.0
+            mask = mask.view(2, 16)   # 2 wrists/groups, 16 channels each
+
+            return y * mask.unsqueeze(0)
+
+        raise ValueError(f"Unknown mode: {self.mode}")
+
+
+@dataclass
+class DownsampleTime:
+    """Downsamples the raw EMG signal along the time dimension.
+
+    This transform keeps every `factor`-th sample from the input tensor while
+    preserving all non-time dimensions. It is used to simulate lower EMG
+    sampling rates for the sampling-rate ablation experiment.
+
+    For example, if the original data is sampled at 2000 Hz:
+      - `factor=1` corresponds to 2000 Hz,
+      - `factor=2` corresponds to 1000 Hz,
+      - `factor=4` corresponds to 500 Hz,
+      - `factor=8` corresponds to 250 Hz.
+
+    Args:
+        factor (int): Integer downsampling factor applied along the first
+            (time) dimension. Must be positive. (default: 1)
+    """
+
+    factor: int = 1
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        return x[:: self.factor].contiguous()

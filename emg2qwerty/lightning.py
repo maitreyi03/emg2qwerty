@@ -16,7 +16,7 @@ import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 from torch import nn
-from torch.utils.data import ConcatDataset, DataLoader
+from torch.utils.data import ConcatDataset, DataLoader, Subset
 from torchmetrics import MetricCollection
 
 from emg2qwerty import utils
@@ -48,6 +48,8 @@ class WindowedEMGDataModule(pl.LightningDataModule):
         train_transform: Transform[np.ndarray, torch.Tensor],
         val_transform: Transform[np.ndarray, torch.Tensor],
         test_transform: Transform[np.ndarray, torch.Tensor],
+        train_fraction: float = 1.0,
+        subset_seed: int = 0,
     ) -> None:
         super().__init__()
         self.window_length = window_length
@@ -63,9 +65,12 @@ class WindowedEMGDataModule(pl.LightningDataModule):
         self.val_transform = val_transform
         self.test_transform = test_transform
 
+        self.train_fraction = train_fraction
+        self.subset_seed = subset_seed
+
     def setup(self, stage: str | None = None) -> None:
         # Train: windowed, jittered; your custom augmentation lives in data.py and is toggled here
-        self.train_dataset = ConcatDataset(
+        full_train_dataset = ConcatDataset(
             [
                 WindowedEMGDataset(
                     hdf5_path,
@@ -78,6 +83,24 @@ class WindowedEMGDataModule(pl.LightningDataModule):
                 for hdf5_path in self.train_sessions
             ]
         )
+
+        if self.train_fraction < 1.0:
+            n_total = len(full_train_dataset)
+            n_keep = max(1, int(round(n_total * self.train_fraction)))
+            rng = np.random.default_rng(self.subset_seed)
+            indices = np.sort(rng.choice(n_total, size=n_keep, replace=False))
+            self.train_dataset = Subset(full_train_dataset, indices.tolist())
+        else:
+            self.train_dataset = full_train_dataset
+
+        print("TRAIN DATASET TYPE:", type(self.train_dataset))
+        if hasattr(self.train_dataset, "datasets"):
+            ds0 = self.train_dataset.datasets[0]
+        else:
+            ds0 = self.train_dataset
+
+        print("TRAIN jitter:", ds0.jitter)
+        print("TRAIN augment:", ds0.augment)
 
         # Val: windowed, no jitter/augment
         self.val_dataset = ConcatDataset(
@@ -278,6 +301,105 @@ class TDSConvCTCModule(_BaseCTCModule):
         x = self.frontend(inputs)       # (T, N, C)
         x = self.encoder(x)             # (T', N, C)
         emissions = self.classifier(x)  # (T', N, classes)
+        return emissions
+
+
+# -----------------------------
+# CNN + BiGRU (or LSTM) + CTC
+# -----------------------------
+class TDSRNNCTCModule(_BaseCTCModule):
+    NUM_BANDS: ClassVar[int] = 2
+    ELECTRODE_CHANNELS: ClassVar[int] = 16
+
+    def __init__(
+        self,
+        in_features: int,
+        mlp_features: Sequence[int],
+        block_channels: Sequence[int],
+        kernel_width: int,
+        rnn_type: str = "gru",          # "gru" or "lstm"
+        rnn_hidden: int = 256,
+        rnn_layers: int = 2,
+        bidirectional: bool = True,
+        rnn_dropout: float = 0.1,
+        optimizer: DictConfig | None = None,
+        lr_scheduler: DictConfig | None = None,
+        decoder: DictConfig | None = None,
+    ) -> None:
+        assert decoder is not None, "decoder config must be provided"
+        super().__init__(decoder=decoder)
+        self.save_hyperparameters()
+
+        num_features = self.NUM_BANDS * mlp_features[-1]
+
+        self.frontend = nn.Sequential(
+            SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),
+            MultiBandRotationInvariantMLP(
+                in_features=in_features,
+                mlp_features=mlp_features,
+                num_bands=self.NUM_BANDS,
+            ),
+            nn.Flatten(start_dim=2),
+        )
+
+        self.encoder = TDSConvEncoder(
+            num_features=num_features,
+            block_channels=block_channels,
+            kernel_width=kernel_width,
+        )
+
+        rnn_dropout_eff = rnn_dropout if rnn_layers > 1 else 0.0
+
+        if rnn_type.lower() == "gru":
+            self.rnn = nn.GRU(
+                input_size=num_features,
+                hidden_size=rnn_hidden,
+                num_layers=rnn_layers,
+                dropout=rnn_dropout_eff,
+                bidirectional=bidirectional,
+                batch_first=False,  # input is (T, N, C)
+            )
+        elif rnn_type.lower() == "lstm":
+            self.rnn = nn.LSTM(
+                input_size=num_features,
+                hidden_size=rnn_hidden,
+                num_layers=rnn_layers,
+                dropout=rnn_dropout_eff,
+                bidirectional=bidirectional,
+                batch_first=False,  # input is (T, N, C)
+            )
+        else:
+            raise ValueError(f"Unsupported rnn_type: {rnn_type}")
+
+        rnn_out_features = rnn_hidden * (2 if bidirectional else 1)
+
+        self.classifier = nn.Sequential(
+            nn.Linear(rnn_out_features, charset().num_classes),
+            nn.LogSoftmax(dim=-1),
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        x = self.frontend(inputs).contiguous()   # (T, N, num_features)
+        x = self.encoder(x).contiguous()         # (T', N, num_features)
+
+        # Short/windowed batches: use normal GPU GRU
+        if self.training or x.shape[0] < 50000:
+            self.rnn.flatten_parameters()
+            x, _ = self.rnn(x)
+        else:
+            # Full-session test fallback: run GRU on CPU to avoid cuDNN failure
+            orig_device = x.device
+
+            self.rnn.cpu()
+            x_cpu = x.float().cpu()
+
+            with torch.no_grad():
+                x_cpu, _ = self.rnn(x_cpu)
+
+            x = x_cpu.to(orig_device)
+            self.rnn.to(orig_device)
+
+        emissions = self.classifier(x)           # (T', N, num_classes)
         return emissions
 
 

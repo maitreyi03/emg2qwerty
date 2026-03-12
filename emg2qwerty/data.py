@@ -420,7 +420,7 @@ class LabelData:
     def __str__(self) -> str:
         """Human-readable string representation for display."""
         return self.text.replace("⏎", "\n")
-# GUASSIAN NOISE 
+# GUASSIAN NOISE
 def augment_emg(emg: torch.Tensor, p_drop: float = 0.5, k: int = 4, noise_scale: float = 0.01, gain_jitter: float=0.15, p_gain:float=1.0) -> torch.Tensor:
     """
     Simple training-time augmentation:
@@ -497,7 +497,7 @@ class WindowedEMGDataset(torch.utils.data.Dataset):
     jitter: bool = False
     transform: Transform[np.ndarray, torch.Tensor] = field(default_factory=ToTensor)
 
-    # NEW: augmentation flag
+    # augmentation flag
     augment: bool = False
 
     def __post_init__(
@@ -552,9 +552,26 @@ class WindowedEMGDataset(torch.utils.data.Dataset):
         #if self.augment:
         #    emg = augment_emg(emg, p_drop=0.5, k=4, noise_scale=0.01)
 
+        # if self.augment:
+        #   # Gain jitter experiment: Gaussian off (noise_scale=0.0)
+        #   emg = augment_emg(emg, p_drop=0.5, k=4, gain_jitter=0.15, p_gain=1.0, noise_scale=0.0)
+
         if self.augment:
-          # Gain jitter experiment: Gaussian off (noise_scale=0.0)
-          emg = augment_emg(emg, p_drop=0.5, k=4, gain_jitter=0.15, p_gain=1.0, noise_scale=0.0)
+            emg_before = emg.clone()
+            emg = augment_emg(
+                emg,
+                p_drop=0.5,
+                k=4,
+                gain_jitter=0.15,
+                p_gain=1.0,
+                noise_scale=0.0,
+            )
+            if not hasattr(self, "_printed_augment_debug"):
+                print("AUGMENT V2 ACTIVE")
+                print("mean|before| =", float(emg_before.abs().mean()))
+                print("mean|after|  =", float(emg.abs().mean()))
+                print("mean|delta|  =", float((emg - emg_before).abs().mean()))
+                self._printed_augment_debug = True
 
         # Extract labels corresponding to the original (un-padded) window.
         timestamps = window[EMGSessionData.TIMESTAMPS]
