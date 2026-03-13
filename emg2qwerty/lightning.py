@@ -107,9 +107,9 @@ class WindowedEMGDataModule(pl.LightningDataModule):
         else:
             ds0 = self.train_dataset
 
-        print("TRAIN jitter:", ds0.jitter)
-        print("TRAIN augment:", ds0.augment)
-        print("TRAIN augment gauss:", ds0.augment_gauss)
+        # print("TRAIN jitter:", ds0.jitter)
+        # print("TRAIN augment:", ds0.augment)
+        # print("TRAIN augment gauss:", ds0.augment_gauss)
 
         # Val: windowed, no jitter/augment
         self.val_dataset = ConcatDataset(
