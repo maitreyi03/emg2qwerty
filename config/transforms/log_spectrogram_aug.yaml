@@ -40,7 +40,10 @@ transforms:
     - ${to_tensor}
     - ${channel_mask}
     - ${downsample}
+    - ${band_rotation}
+    - ${temporal_jitter}
     - ${logspec}
+    - ${specaug}
 
   val:
     - ${to_tensor}

@@ -50,6 +50,9 @@ class WindowedEMGDataModule(pl.LightningDataModule):
         test_transform: Transform[np.ndarray, torch.Tensor],
         train_fraction: float = 1.0,
         subset_seed: int = 0,
+        train_jitter: bool = False,
+        train_augment: bool = False,
+        train_augment_gauss: bool = False,
     ) -> None:
         super().__init__()
         self.window_length = window_length
@@ -68,6 +71,10 @@ class WindowedEMGDataModule(pl.LightningDataModule):
         self.train_fraction = train_fraction
         self.subset_seed = subset_seed
 
+        self.train_jitter = train_jitter
+        self.train_augment = train_augment
+        self.train_augment_gauss = train_augment_gauss
+
     def setup(self, stage: str | None = None) -> None:
         # Train: windowed, jittered; your custom augmentation lives in data.py and is toggled here
         full_train_dataset = ConcatDataset(
@@ -77,8 +84,9 @@ class WindowedEMGDataModule(pl.LightningDataModule):
                     transform=self.train_transform,
                     window_length=self.window_length,
                     padding=self.padding,
-                    jitter=True,
-                    augment=True,
+                    jitter=self.train_jitter,
+                    augment=self.train_augment,
+                    augment_gauss=self.train_augment_gauss,
                 )
                 for hdf5_path in self.train_sessions
             ]
@@ -101,6 +109,7 @@ class WindowedEMGDataModule(pl.LightningDataModule):
 
         print("TRAIN jitter:", ds0.jitter)
         print("TRAIN augment:", ds0.augment)
+        print("TRAIN augment gauss:", ds0.augment_gauss)
 
         # Val: windowed, no jitter/augment
         self.val_dataset = ConcatDataset(
@@ -305,7 +314,7 @@ class TDSConvCTCModule(_BaseCTCModule):
 
 
 # -----------------------------
-# CNN + BiGRU (or LSTM) + CTC
+# CNN + bidirectional RNN (GRU or LSTM) + CTC
 # -----------------------------
 class TDSRNNCTCModule(_BaseCTCModule):
     NUM_BANDS: ClassVar[int] = 2
@@ -382,12 +391,12 @@ class TDSRNNCTCModule(_BaseCTCModule):
         x = self.frontend(inputs).contiguous()   # (T, N, num_features)
         x = self.encoder(x).contiguous()         # (T', N, num_features)
 
-        # Short/windowed batches: use normal GPU GRU
+        # Short/windowed batches: use normal GPU RNN
         if self.training or x.shape[0] < 50000:
             self.rnn.flatten_parameters()
             x, _ = self.rnn(x)
         else:
-            # Full-session test fallback: run GRU on CPU to avoid cuDNN failure
+            # Full-session test fallback: run recurrent layer on CPU to avoid cuDNN failure
             orig_device = x.device
 
             self.rnn.cpu()

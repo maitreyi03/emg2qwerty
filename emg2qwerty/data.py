@@ -499,6 +499,7 @@ class WindowedEMGDataset(torch.utils.data.Dataset):
 
     # augmentation flag
     augment: bool = False
+    augment_gauss: bool = False
 
     def __post_init__(
         self,
@@ -548,23 +549,15 @@ class WindowedEMGDataset(torch.utils.data.Dataset):
         emg = self.transform(window)
         assert torch.is_tensor(emg)
 
-        # apply augmentation only if enabled
-        #if self.augment:
-        #    emg = augment_emg(emg, p_drop=0.5, k=4, noise_scale=0.01)
+        # Data augmentation v1: Gaussian noise
+        if self.augment_gauss:
+           emg = augment_emg(emg, p_drop=0.5, k=4, noise_scale=0.01)
 
-        # if self.augment:
-        #   # Gain jitter experiment: Gaussian off (noise_scale=0.0)
-        #   emg = augment_emg(emg, p_drop=0.5, k=4, gain_jitter=0.15, p_gain=1.0, noise_scale=0.0)
-
+        # Data augmentation v2: Gain jitter experiment
         if self.augment:
             emg_before = emg.clone()
-            emg = augment_emg(
-                emg,
-                p_drop=0.5,
-                k=4,
-                gain_jitter=0.15,
-                p_gain=1.0,
-                noise_scale=0.0,
+            emg = augment_emg(emg, p_drop=0.5, k=4, gain_jitter=0.15, p_gain=1.0,
+                noise_scale=0.0, # Gaussian off
             )
             if not hasattr(self, "_printed_augment_debug"):
                 print("AUGMENT V2 ACTIVE")
